@@ -598,8 +598,10 @@ pub const Provider = struct {
                 "raw length record missing in stream {d}",
                 .{self.stream_no},
             );
-        // FDICT streams contribute no bytes to the raw file
-        if (!self.fdict) self.raw_base += @intCast(v);
+        // FDICT streams contribute no bytes to the raw file. Saturating add:
+        // replayCore bounds-checks the stream against the actual raw file, so
+        // an absurd uvarint must fail cleanly instead of overflowing here.
+        if (!self.fdict) self.raw_base +|= @intCast(v);
         return v;
     }
 

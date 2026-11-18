@@ -333,7 +333,10 @@ fn replayCore(
         st.raw_len = raw_len;
         st.compressed_len = bw.bytes_written - stream_start_bytes;
         if (can_verify) {
-            if (raw_pos + @as(usize, @intCast(raw_len)) > raw_bytes.len) {
+            // Subtraction form: raw_pos <= raw_bytes.len always holds, and
+            // an addition here would overflow-panic on an absurd raw_len
+            // from a corrupt params file before the comparison runs.
+            if (raw_len > raw_bytes.len - raw_pos) {
                 diagnostics.set(
                     "stream {d}: raw data length mismatch (params require {d} bytes, raw provides {d})",
                     .{ stream_no, raw_len, raw_bytes.len - raw_pos },
@@ -752,5 +755,75 @@ test "v2 derived params require raw" {
             &diagnostics,
             &out_aw.writer,
         ),
+    );
+}
+
+test "v2 replay rejects an absurd raw length cleanly" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics{};
+
+    // minimal self-contained zlib stream whose raw_len uvarint is maxInt(u64)
+    var paw: std.Io.Writer.Allocating = .init(allocator);
+    defer paw.deinit();
+    try paw.writer.writeAll(&format_v2.magic);
+    try paw.writer.writeByte(2);
+    try paw.writer.writeByte(0);
+    var bw = bits.BitWriter.init(&paw.writer);
+    try bw.writeAligned(&[_]u8{@intFromEnum(container.Kind.zlib)});
+    try bw.writeAligned(&[_]u8{ 0x78, 0x9c });
+    try bw.writeBit(1); // self-contained
+    try bw.writeBit(0); // rank mode off
+    try bw.writeBit(1); // BFINAL
+    try bw.writeBits(0, 2); // stored block
+    try bw.writeBits(0, 7); // pad value
+    try params.putUvarint(&bw, 0); // LEN
+    try bw.writeBits(0, 7); // trailing pad
+    try bw.padToBoundary(0);
+    try bw.writeAligned(&[_]u8{ 0, 0, 0, 0 }); // Adler-32, verbatim
+    try params.putUvarint(&bw, std.math.maxInt(u64)); // absurd raw length
+
+    var out_aw: std.Io.Writer.Allocating = .init(allocator);
+    defer out_aw.deinit();
+    try std.testing.expectError(
+        error.RawLengthMismatch,
+        replay(allocator, paw.written(), "", .{}, &diagnostics, &out_aw.writer),
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, diagnostics.get(), "length mismatch") != null,
+    );
+}
+
+test "v3 replay rejects an absurd raw length cleanly" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics{};
+
+    // same stream shape in DRP3, where raw_len rides the stream header
+    var paw: std.Io.Writer.Allocating = .init(allocator);
+    defer paw.deinit();
+    try paw.writer.writeAll(&format_v3.magic);
+    try paw.writer.writeByte(3);
+    try paw.writer.writeByte(0);
+    var bw = bits.BitWriter.init(&paw.writer);
+    try bw.writeAligned(&[_]u8{@intFromEnum(container.Kind.zlib)});
+    try bw.writeAligned(&[_]u8{ 0x78, 0x9c });
+    try bw.writeBit(1); // self-contained
+    try bw.writeBit(0); // rank mode off
+    try params.putUvarint(&bw, std.math.maxInt(u64)); // absurd raw length
+    try bw.writeBit(1); // BFINAL
+    try bw.writeBits(0, 2); // stored block
+    try bw.writeBits(0, 7); // pad value
+    try params.putUvarint(&bw, 0); // LEN
+    try bw.writeBits(0, 7); // trailing pad
+    try bw.padToBoundary(0);
+    try bw.writeAligned(&[_]u8{ 0, 0, 0, 0 }); // Adler-32, verbatim
+
+    var out_aw: std.Io.Writer.Allocating = .init(allocator);
+    defer out_aw.deinit();
+    try std.testing.expectError(
+        error.RawLengthMismatch,
+        replay(allocator, paw.written(), "", .{}, &diagnostics, &out_aw.writer),
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, diagnostics.get(), "length mismatch") != null,
     );
 }

@@ -465,8 +465,10 @@ pub const Provider = struct {
 
     pub fn rawLen(self: *Self) !u64 {
         // The raw length is stored in the stream header (predictor bounds);
-        // only the raw-file cursor advances here.
-        if (!self.fdict) self.raw_base += @intCast(self.raw_len_stored);
+        // only the raw-file cursor advances here. Saturating add: replayCore
+        // bounds-checks the stream against the actual raw file, so an absurd
+        // stored length must fail cleanly instead of overflowing here.
+        if (!self.fdict) self.raw_base +|= @intCast(self.raw_len_stored);
         return self.raw_len_stored;
     }
 
