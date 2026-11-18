@@ -9,12 +9,13 @@ const params = @import("../params.zig");
 
 const Diagnostics = @import("../diagnostics.zig").Diagnostics;
 
-const DynHdr = @import("../records.zig").DynHdr;
-const StreamFlags = @import("../records.zig").StreamFlags;
-const BlockHdr = @import("../records.zig").BlockHdr;
-const StoredBlock = @import("../records.zig").StoredBlock;
-const Token = @import("../records.zig").Token;
-const TrailingRec = @import("../records.zig").TrailingRec;
+const records = @import("../records.zig");
+const DynHdr = records.DynHdr;
+const StreamFlags = records.StreamFlags;
+const BlockHdr = records.BlockHdr;
+const StoredBlock = records.StoredBlock;
+const Token = records.Token;
+const TrailingRec = records.TrailingRec;
 
 pub const magic = [4]u8{ 'D', 'R', 'P', '3' };
 
@@ -56,7 +57,6 @@ pub const Provider = struct {
         .hdist = 1,
         .hclen = 4,
     },
-    cl_dec: huffman.Decode = undefined,
     stored_buf: [65535]u8 = undefined,
 
     pub fn init(
@@ -257,109 +257,13 @@ pub const Provider = struct {
     }
 
     pub fn dynHeader(self: *Self) !*const DynHdr {
-        const hlit5 = self.br.readBits(5) catch return self.badDyn();
-        const hdist5 = self.br.readBits(5) catch return self.badDyn();
-        const hclen4 = self.br.readBits(4) catch return self.badDyn();
-        const hlit: usize = 257 + @as(usize, @intCast(hlit5));
-        const hdist: usize = 1 + @as(usize, @intCast(hdist5));
-        const hclen: usize = 4 + @as(usize, @intCast(hclen4));
-        if (hlit > tables.max_hlit or hdist > tables.max_hdist)
-            return self.bad(
-                "too many codes in stream {d} (hlit={d}, hdist={d})",
-                .{ self.stream_no, hlit, hdist },
-            );
-
-        const d = &self.dyn;
-        d.hlit = @intCast(hlit);
-        d.hdist = @intCast(hdist);
-        d.hclen = @intCast(hclen);
-        d.rle_count = 0;
-
-        var cl_lens: [19]u8 = @splat(0);
-        for (0..hclen) |i| {
-            const v = self.br.readBits(3) catch return self.badDyn();
-            d.cl_stream[i] = @intCast(v);
-            cl_lens[tables.cl_permutation[i]] = @intCast(v);
-        }
-        self.cl_dec = huffman.Decode.init(&cl_lens) catch
-            return self.bad(
-                "over-subscribed code-length code in stream {d}",
-                .{self.stream_no},
-            );
-
-        var idx: usize = 0;
-        const total = hlit + hdist;
-        while (idx < total) {
-            const sym = self.cl_dec.decode(&self.br) catch
-                return self.bad(
-                    "bad code-length code in stream {d}",
-                    .{self.stream_no},
-                );
-            switch (sym) {
-                0...15 => {
-                    d.lens[idx] = @intCast(sym);
-                    idx += 1;
-                    d.rle[d.rle_count] = .{
-                        .sym = @intCast(sym),
-                        .extra = 0,
-                    };
-                    d.rle_count += 1;
-                },
-                16 => {
-                    const e = self.br.readBits(2) catch return self.badDyn();
-                    const n = 3 + @as(usize, @intCast(e));
-                    if (idx == 0 or idx + n > total)
-                        return self.bad(
-                            "bad code-length repeat in stream {d}",
-                            .{self.stream_no},
-                        );
-                    @memset(d.lens[idx..][0..n], d.lens[idx - 1]);
-                    idx += n;
-                    d.rle[d.rle_count] = .{ .sym = 16, .extra = @intCast(e) };
-                    d.rle_count += 1;
-                },
-                17 => {
-                    const e = self.br.readBits(3) catch return self.badDyn();
-                    const n = 3 + @as(usize, @intCast(e));
-                    if (idx + n > total)
-                        return self.bad(
-                            "bad code-length run in stream {d}",
-                            .{self.stream_no},
-                        );
-                    @memset(d.lens[idx..][0..n], 0);
-                    idx += n;
-                    d.rle[d.rle_count] = .{ .sym = 17, .extra = @intCast(e) };
-                    d.rle_count += 1;
-                },
-                18 => {
-                    const e = self.br.readBits(7) catch return self.badDyn();
-                    const n = 11 + @as(usize, @intCast(e));
-                    if (idx + n > total)
-                        return self.bad("bad code-length run in stream {d}", .{self.stream_no});
-                    @memset(d.lens[idx..][0..n], 0);
-                    idx += n;
-                    d.rle[d.rle_count] = .{ .sym = 18, .extra = @intCast(e) };
-                    d.rle_count += 1;
-                },
-                else => return self.bad("bad code-length symbol {d} in stream {d}", .{ sym, self.stream_no }),
-            }
-        }
-
-        if (d.lens[256] == 0)
-            return self.bad("dynamic block has no end-of-block code in stream {d}", .{self.stream_no});
-        _ = huffman.Encode.init(d.lens[0..hlit]) catch
+        try records.readDynHeader(&self.br, self.stream_no, 0, self.diagnostics, &self.dyn);
+        _ = huffman.Encode.init(self.dyn.lens[0..self.dyn.hlit]) catch
             return self.bad("bad literal/length code set in stream {d}", .{self.stream_no});
-        _ = huffman.Encode.init(d.lens[hlit..][0..hdist]) catch
+        _ = huffman.Encode.init(self.dyn.lens[self.dyn.hlit..][0..self.dyn.hdist]) catch
             return self.bad("bad distance code set in stream {d}", .{self.stream_no});
         try self.readTokenSection();
-        return d;
-    }
-
-    fn badDyn(self: *Self) error{BadParams} {
-        return self.bad(
-            "dynamic header truncated in stream {d}",
-            .{self.stream_no},
-        );
+        return &self.dyn;
     }
 
     pub fn storedBlock(self: *Self, p: usize) !StoredBlock {

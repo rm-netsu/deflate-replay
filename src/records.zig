@@ -69,6 +69,198 @@ pub const DynHdr = struct {
     lens: [tables.max_code_lengths]u8 = @splat(0),
 };
 
+pub const DynHdrError = error{
+    EndOfStream,
+    InvalidCode,
+    OverSubscribedCode,
+    BadCodeLengthRepeat,
+    TooManySymbols,
+    MissingEndOfBlockCode,
+};
+
+fn dynBits(
+    br: *bits.BitReader,
+    n: u4,
+    what: []const u8,
+    stream_no: usize,
+    bit_base: u64,
+    diagnostics: *Diagnostics,
+) error{EndOfStream}!u32 {
+    return br.readBits(n) catch {
+        diagnostics.set(
+            "stream {d}, bit offset {d}: unexpected end of data in {s}",
+            .{ stream_no, bit_base + br.bitsConsumed(), what },
+        );
+        return error.EndOfStream;
+    };
+}
+
+/// Reads and validates a dynamic-block header: HLIT/HDIST/HCLEN, the
+/// code-length code lengths, and the RLE-coded length sequence into `out`.
+/// Shared by analyze (reading compressed input) and by the DRP2/DRP3
+/// providers (reading params data) so all three sides apply byte-identical
+/// validation rules; `bit_base` is added to the reader position in
+/// diagnostics (analyze passes the stream's absolute bit offset).
+pub fn readDynHeader(
+    br: *bits.BitReader,
+    stream_no: usize,
+    bit_base: u64,
+    diagnostics: *Diagnostics,
+    out: *DynHdr,
+) DynHdrError!void {
+    const hlit5 = try dynBits(br, 5, "HLIT", stream_no, bit_base, diagnostics);
+    const hdist5 = try dynBits(br, 5, "HDIST", stream_no, bit_base, diagnostics);
+    const hclen4 = try dynBits(br, 4, "HCLEN", stream_no, bit_base, diagnostics);
+    const hlit: usize = 257 + @as(usize, @intCast(hlit5));
+    const hdist: usize = 1 + @as(usize, @intCast(hdist5));
+    const hclen: usize = 4 + @as(usize, @intCast(hclen4));
+    if (hlit > tables.max_hlit or hdist > tables.max_hdist) {
+        diagnostics.set(
+            "stream {d}, bit offset {d}: too many codes (hlit={d}, hdist={d})",
+            .{ stream_no, bit_base + br.bitsConsumed(), hlit, hdist },
+        );
+        return error.TooManySymbols;
+    }
+
+    out.hlit = @intCast(hlit);
+    out.hdist = @intCast(hdist);
+    out.hclen = @intCast(hclen);
+    out.rle_count = 0;
+
+    var cl_lens: [19]u8 = @splat(0);
+    for (0..hclen) |i| {
+        const v = try dynBits(
+            br,
+            3,
+            "code-length code lengths",
+            stream_no,
+            bit_base,
+            diagnostics,
+        );
+        out.cl_stream[i] = @intCast(v);
+        cl_lens[tables.cl_permutation[i]] = @intCast(v);
+    }
+    const cl_dec = huffman.Decode.init(&cl_lens) catch {
+        diagnostics.set(
+            "stream {d}, bit offset {d}: over-subscribed code-length code",
+            .{ stream_no, bit_base + br.bitsConsumed() },
+        );
+        return error.OverSubscribedCode;
+    };
+
+    var idx: usize = 0;
+    const total = hlit + hdist;
+    while (idx < total) {
+        const sym = cl_dec.decode(br) catch |err| switch (err) {
+            error.EndOfStream => {
+                diagnostics.set(
+                    "stream {d}, bit offset {d}: unexpected end of data in code lengths",
+                    .{ stream_no, bit_base + br.bitsConsumed() },
+                );
+                return error.EndOfStream;
+            },
+            error.InvalidCode => {
+                diagnostics.set(
+                    "stream {d}, bit offset {d}: invalid code-length code",
+                    .{ stream_no, bit_base + br.bitsConsumed() },
+                );
+                return error.InvalidCode;
+            },
+        };
+        switch (sym) {
+            0...15 => {
+                out.lens[idx] = @intCast(sym);
+                idx += 1;
+                out.rle[out.rle_count] = .{ .sym = @intCast(sym), .extra = 0 };
+                out.rle_count += 1;
+            },
+            16 => {
+                const e = try dynBits(
+                    br,
+                    2,
+                    "repeat extra bits",
+                    stream_no,
+                    bit_base,
+                    diagnostics,
+                );
+                const n = 3 + @as(usize, @intCast(e));
+                if (idx == 0) {
+                    diagnostics.set(
+                        "stream {d}, bit offset {d}: code-length repeat with no previous length",
+                        .{ stream_no, bit_base + br.bitsConsumed() },
+                    );
+                    return error.BadCodeLengthRepeat;
+                }
+                if (idx + n > total) {
+                    diagnostics.set(
+                        "stream {d}, bit offset {d}: code-length repeat overflows table",
+                        .{ stream_no, bit_base + br.bitsConsumed() },
+                    );
+                    return error.BadCodeLengthRepeat;
+                }
+                const prev = out.lens[idx - 1];
+                @memset(out.lens[idx..][0..n], prev);
+                idx += n;
+                out.rle[out.rle_count] = .{ .sym = 16, .extra = @intCast(e) };
+                out.rle_count += 1;
+            },
+            17 => {
+                const e = try dynBits(
+                    br,
+                    3,
+                    "zero-run extra bits",
+                    stream_no,
+                    bit_base,
+                    diagnostics,
+                );
+                const n = 3 + @as(usize, @intCast(e));
+                if (idx + n > total) {
+                    diagnostics.set(
+                        "stream {d}, bit offset {d}: code-length run overflows table",
+                        .{ stream_no, bit_base + br.bitsConsumed() },
+                    );
+                    return error.BadCodeLengthRepeat;
+                }
+                @memset(out.lens[idx..][0..n], 0);
+                idx += n;
+                out.rle[out.rle_count] = .{ .sym = 17, .extra = @intCast(e) };
+                out.rle_count += 1;
+            },
+            18 => {
+                const e = try dynBits(
+                    br,
+                    7,
+                    "zero-run extra bits",
+                    stream_no,
+                    bit_base,
+                    diagnostics,
+                );
+                const n = 11 + @as(usize, @intCast(e));
+                if (idx + n > total) {
+                    diagnostics.set(
+                        "stream {d}, bit offset {d}: code-length run overflows table",
+                        .{ stream_no, bit_base + br.bitsConsumed() },
+                    );
+                    return error.BadCodeLengthRepeat;
+                }
+                @memset(out.lens[idx..][0..n], 0);
+                idx += n;
+                out.rle[out.rle_count] = .{ .sym = 18, .extra = @intCast(e) };
+                out.rle_count += 1;
+            },
+            else => unreachable,
+        }
+    }
+
+    if (out.lens[256] == 0) {
+        diagnostics.set(
+            "stream {d}, bit offset {d}: dynamic block has no end-of-block code",
+            .{ stream_no, bit_base + br.bitsConsumed() },
+        );
+        return error.MissingEndOfBlockCode;
+    }
+}
+
 pub const StreamFlags = struct { self_contained: bool, rank_mode: bool };
 pub const StoredBlock = struct { pad: u8, len: u16, data: ?[]const u8 };
 pub const BlockHdr = struct { bfinal: bool, btype: u2 };

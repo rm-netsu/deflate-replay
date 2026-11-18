@@ -427,157 +427,17 @@ fn parseDynamicHeader(
     lit: *huffman.Decode,
     dist: *huffman.Decode,
 ) !void {
-    const hlit5 = try readBitsOrFail(ctx, br, 5, "HLIT");
-    const hdist5 = try readBitsOrFail(ctx, br, 5, "HDIST");
-    const hclen4 = try readBitsOrFail(ctx, br, 4, "HCLEN");
-    const hlit: usize = 257 + @as(usize, @intCast(hlit5));
-    const hdist: usize = 1 + @as(usize, @intCast(hdist5));
-    const hclen: usize = 4 + @as(usize, @intCast(hclen4));
-    if (hlit > tables.max_hlit or hdist > tables.max_hdist) {
-        ctx.diagnostics.set(
-            "stream {d}, bit offset {d}: too many codes (hlit={d}, hdist={d})",
-            .{ ctx.stream_no, bitAbs(ctx, br), hlit, hdist },
-        );
-        return error.TooManySymbols;
-    }
+    var dh: records.DynHdr = .{ .hlit = tables.min_hlit, .hdist = 1, .hclen = 4 };
+    try records.readDynHeader(br, ctx.stream_no, ctx.defl_bit_base, ctx.diagnostics, &dh);
 
-    var cl_lens: [19]u8 = @splat(0);
-    var cl_stream: [19]u8 = undefined;
-    for (0..hclen) |i| {
-        const v = try readBitsOrFail(
-            ctx,
-            br,
-            3,
-            "code-length code lengths",
-        );
-        cl_stream[i] = @intCast(v);
-        cl_lens[tables.cl_permutation[i]] = @intCast(v);
-    }
-    const cl_dec = huffman.Decode.init(&cl_lens) catch {
-        ctx.diagnostics.set(
-            "stream {d}, bit offset {d}: over-subscribed code-length code",
-            .{ ctx.stream_no, bitAbs(ctx, br) },
-        );
-        return error.OverSubscribedCode;
-    };
-
-    var lens: [tables.max_code_lengths]u8 = undefined;
-    var rle: [tables.max_code_lengths]tables.RleToken = undefined;
-    var rle_count: usize = 0;
-    var idx: usize = 0;
-    const total = hlit + hdist;
-
-    while (idx < total) {
-        const sym = cl_dec.decode(br) catch |err| switch (err) {
-            error.EndOfStream => {
-                ctx.diagnostics.set(
-                    "stream {d}, bit offset {d}: unexpected end of data in code lengths",
-                    .{ ctx.stream_no, bitAbs(ctx, br) },
-                );
-                return error.EndOfStream;
-            },
-            error.InvalidCode => {
-                ctx.diagnostics.set(
-                    "stream {d}, bit offset {d}: invalid code-length code",
-                    .{ ctx.stream_no, bitAbs(ctx, br) },
-                );
-                return error.InvalidCode;
-            },
-        };
-        switch (sym) {
-            0...15 => {
-                lens[idx] = @intCast(sym);
-                idx += 1;
-                rle[rle_count] = .{ .sym = @intCast(sym), .extra = 0 };
-                rle_count += 1;
-            },
-            16 => {
-                const e = try readBitsOrFail(
-                    ctx,
-                    br,
-                    2,
-                    "repeat extra bits",
-                );
-                const n = 3 + @as(usize, @intCast(e));
-                if (idx == 0) {
-                    ctx.diagnostics.set(
-                        "stream {d}, bit offset {d}: code-length repeat with no previous length",
-                        .{ ctx.stream_no, bitAbs(ctx, br) },
-                    );
-                    return error.BadCodeLengthRepeat;
-                }
-                if (idx + n > total) {
-                    ctx.diagnostics.set(
-                        "stream {d}, bit offset {d}: code-length repeat overflows table",
-                        .{ ctx.stream_no, bitAbs(ctx, br) },
-                    );
-                    return error.BadCodeLengthRepeat;
-                }
-                const prev = lens[idx - 1];
-                @memset(lens[idx..][0..n], prev);
-                idx += n;
-                rle[rle_count] = .{ .sym = 16, .extra = @intCast(e) };
-                rle_count += 1;
-            },
-            17 => {
-                const e = try readBitsOrFail(
-                    ctx,
-                    br,
-                    3,
-                    "zero-run extra bits",
-                );
-                const n = 3 + @as(usize, @intCast(e));
-                if (idx + n > total) {
-                    ctx.diagnostics.set(
-                        "stream {d}, bit offset {d}: code-length run overflows table",
-                        .{ ctx.stream_no, bitAbs(ctx, br) },
-                    );
-                    return error.BadCodeLengthRepeat;
-                }
-                @memset(lens[idx..][0..n], 0);
-                idx += n;
-                rle[rle_count] = .{ .sym = 17, .extra = @intCast(e) };
-                rle_count += 1;
-            },
-            18 => {
-                const e = try readBitsOrFail(
-                    ctx,
-                    br,
-                    7,
-                    "zero-run extra bits",
-                );
-                const n = 11 + @as(usize, @intCast(e));
-                if (idx + n > total) {
-                    ctx.diagnostics.set(
-                        "stream {d}, bit offset {d}: code-length run overflows table",
-                        .{ ctx.stream_no, bitAbs(ctx, br) },
-                    );
-                    return error.BadCodeLengthRepeat;
-                }
-                @memset(lens[idx..][0..n], 0);
-                idx += n;
-                rle[rle_count] = .{ .sym = 18, .extra = @intCast(e) };
-                rle_count += 1;
-            },
-            else => unreachable,
-        }
-    }
-
-    if (lens[256] == 0) {
-        ctx.diagnostics.set(
-            "stream {d}, bit offset {d}: dynamic block has no end-of-block code",
-            .{ ctx.stream_no, bitAbs(ctx, br) },
-        );
-        return error.MissingEndOfBlockCode;
-    }
-    lit.* = huffman.Decode.init(lens[0..hlit]) catch {
+    lit.* = huffman.Decode.init(dh.lens[0..dh.hlit]) catch {
         ctx.diagnostics.set(
             "stream {d}, bit offset {d}: over-subscribed literal/length code set",
             .{ ctx.stream_no, bitAbs(ctx, br) },
         );
         return error.OverSubscribedCode;
     };
-    dist.* = huffman.Decode.init(lens[hlit..][0..hdist]) catch {
+    dist.* = huffman.Decode.init(dh.lens[dh.hlit..][0..dh.hdist]) catch {
         ctx.diagnostics.set(
             "stream {d}, bit offset {d}: over-subscribed distance code set",
             .{ ctx.stream_no, bitAbs(ctx, br) },
@@ -585,12 +445,12 @@ fn parseDynamicHeader(
         return error.OverSubscribedCode;
     };
 
-    try params.putU16le(ctx.pw, @intCast(hlit));
-    try params.putU16le(ctx.pw, @intCast(hdist));
-    try ctx.pw.writeByte(@intCast(hclen));
-    try ctx.pw.writeAll(cl_stream[0..hclen]);
-    try params.putU16le(ctx.pw, @intCast(rle_count));
-    for (rle[0..rle_count]) |t| {
+    try params.putU16le(ctx.pw, dh.hlit);
+    try params.putU16le(ctx.pw, dh.hdist);
+    try ctx.pw.writeByte(dh.hclen);
+    try ctx.pw.writeAll(dh.cl_stream[0..dh.hclen]);
+    try params.putU16le(ctx.pw, @intCast(dh.rle_count));
+    for (dh.rle[0..dh.rle_count]) |t| {
         try ctx.pw.writeByte(t.sym);
         try ctx.pw.writeByte(t.extra);
     }
