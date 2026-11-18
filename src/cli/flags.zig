@@ -67,16 +67,37 @@ pub fn parseCommonFlag(
     }
 
     if (std.mem.eql(u8, arg, "--v1")) {
+        if (flags.v2 or flags.v3) {
+            diagnostics.set(
+                "conflicting params format flags: pick at most one of --v1/--v2/--v3 ('{s}' clashes with an earlier flag)",
+                .{arg},
+            );
+            return error.Usage;
+        }
         flags.v1 = true;
         return true;
     }
 
     if (std.mem.eql(u8, arg, "--v2")) {
+        if (flags.v1 or flags.v3) {
+            diagnostics.set(
+                "conflicting params format flags: pick at most one of --v1/--v2/--v3 ('{s}' clashes with an earlier flag)",
+                .{arg},
+            );
+            return error.Usage;
+        }
         flags.v2 = true;
         return true;
     }
 
     if (std.mem.eql(u8, arg, "--v3")) {
+        if (flags.v1 or flags.v2) {
+            diagnostics.set(
+                "conflicting params format flags: pick at most one of --v1/--v2/--v3 ('{s}' clashes with an earlier flag)",
+                .{arg},
+            );
+            return error.Usage;
+        }
         flags.v3 = true;
         return true;
     }
@@ -106,5 +127,7 @@ pub fn flagsToAnalyzeOptions(flags: CommonFlags) drp.Options {
 }
 
 inline fn paramsVersionFromFlag(flags: CommonFlags) drp.ParamsVersion {
+    // Conflicting combinations are rejected in parseCommonFlag(); exactly one
+    // of the three flags (or none) is set by the time this runs.
     return if (flags.v1) .v1 else if (flags.v2) .v2 else .v3;
 }

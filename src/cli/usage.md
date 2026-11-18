@@ -11,6 +11,8 @@ usage:
                                          the raw data (most compact)
       --v2                             write DRP2 params (bit-packed ranks)
       --v1                             write legacy verbose DRP1 params
+                                       (--v1/--v2/--v3 are mutually
+                                       exclusive)
       --self-contained                 store literal values in the params
                                          (replay without raw)
       --no-rank                        store distances explicitly

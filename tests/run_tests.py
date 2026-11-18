@@ -172,6 +172,13 @@ with open(vec + ".drp", "rb") as f:
     check("--v2 writes DRP2 magic", f.read(4) == b"DRP2")
 r = run([BIN, "replay", vec + ".drp", vec + ".raw", "--out", os.path.join(work, "v2rt.bin")])
 check("v2 params replay", r.returncode == 0 and sha(os.path.join(work, "v2rt.bin")) == sha(vec))
+# conflicting format flags must be rejected, not silently resolved
+r = run([BIN, "roundtrip", vec, "--v1", "--v2"])
+out = r.stdout.decode() + r.stderr.decode()
+check("conflicting --v1/--v2 rejected", r.returncode == 2 and "conflicting" in out)
+r = run([BIN, "roundtrip", vec, "--v3", "--v1"])
+out = r.stdout.decode() + r.stderr.decode()
+check("conflicting --v3/--v1 rejected", r.returncode == 2 and "conflicting" in out)
 r = run([BIN, "roundtrip", vec])  # restore the default v3 params for later checks
 # --no-rank
 r = run([BIN, "roundtrip", vec, "--no-rank"])
