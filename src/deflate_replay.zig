@@ -10,7 +10,8 @@
 //!   analyze.zig  — compressed input -> params + raw data
 //!   replay.zig   — params + raw data -> bit-identical compressed output
 //!   dump.zig     — human-readable view of a params file
-//!   records.zig  — record model, DRP2 compact format, v1->v2 converter
+//!   records.zig  — record model, dynamic-header reader, helpers shared by
+//!                  the converters, DRP2 compact format, v1->v2 converter
 //!   compact3.zig — DRP3 range-coded format, v1->v3 converter
 //!   rc.zig       — adaptive binary range coder (LZMA-style)
 //!   matchfind.zig — deterministic candidate enumeration for distance coding
