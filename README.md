@@ -334,7 +334,7 @@ defer result2.deinit(gpa);
 ## Testing
 
 ```sh
-zig build test                                   # 33 unit tests
+zig build test                                   # 37 unit tests
 python3 tests/gen_vectors.py                     # 45+ vectors
 python3 tests/run_tests.py [path-to-zig] EXTRA_FILES...
 ```
