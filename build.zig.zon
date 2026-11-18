@@ -1,0 +1,13 @@
+.{
+    .name = .deflate_replay,
+    .version = "1.0.0",
+    .fingerprint = 0x7cbe42e8ed075ab2,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
