@@ -75,9 +75,9 @@ pub fn printStreamStats(
                 .{
                     stats.isize_recorded, stats.isize_computed,
                     if (stats.isize_recorded == stats.isize_computed)
-                        "::ss1a match"
+                        "match"
                     else
-                        "::ss1b MISMATCH (reproduced verbatim)",
+                        "MISMATCH (reproduced verbatim)",
                 },
             );
         },

@@ -123,6 +123,11 @@ for path in EXTRA_INPUTS:
         check(f"real: {base} [raw == python zlib]", ref == got)
 
 print("== replay CLI contract ==")
+# regression: stream stats must not leak debug markers into CLI output
+r = run([BIN, "roundtrip", os.path.join(VEC, "gzip_plain.gz")])
+out = r.stdout.decode() + r.stderr.decode()
+check("clean stats output (no debug markers)",
+      r.returncode == 0 and "BIT-IDENTICAL" in out and "::ss" not in out)
 vec = os.path.join(VEC, "concat_mixed.bin")
 r = run([BIN, "analyze", vec])
 check("analyze default names", r.returncode == 0
