@@ -208,6 +208,7 @@ fn dumpCore(
                     const sb = try pv.storedBlock(p);
                     p += sb.len;
                     st.stored_blocks += 1;
+                    if (sb.len == 0) st.stored_flush_blocks += 1;
                     if (sb.data) |d| {
                         if (have_values) try sink.putSlice(d);
                     }

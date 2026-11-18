@@ -209,6 +209,12 @@ check("dump rank placeholders (v2, no raw)", r.returncode == 0 and "rank(" in r.
 # dump of a v3 file without raw shows the structure and token counts
 r = run([BIN, "roundtrip", os.path.join(VEC, "handmade_rank1.def")])
 check("--v3 rank vector roundtrip", r.returncode == 0 and "BIT-IDENTICAL" in r.stdout.decode())
+# dump counts empty stored blocks as flush markers (regression)
+r = run([BIN, "dump", os.path.join(VEC, "zlib_flushes.z.drp"),
+         os.path.join(VEC, "zlib_flushes.z.raw")])
+out = r.stdout.decode()
+check("dump reports empty flush markers",
+      r.returncode == 0 and "empty flush" in out)
 r = run([BIN, "dump", os.path.join(VEC, "handmade_rank1.def.drp"), "--tokens", "10"])
 out = r.stdout.decode()
 check("dump v3 no raw shows counts", r.returncode == 0 and "requires the raw file" in out)
