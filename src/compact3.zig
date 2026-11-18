@@ -40,25 +40,9 @@ const rc = @import("rc.zig");
 const format_v1 = @import("format/v1.zig");
 const format_v3 = @import("format/v3.zig");
 
-/// Candidate budget for the source walk.
-const src_candidates = 64;
-
 pub const Options = stats.Options;
 pub const StreamStats = stats.StreamStats;
 pub const Diagnostics = @import("diagnostics.zig").Diagnostics;
-
-// ---------------------------------------------------------------------------
-// shared predictors (byte-identical behaviour on the analyze and replay sides)
-// ---------------------------------------------------------------------------
-
-/// Number of raw bytes at positions p and j that match, capped at
-/// min(258, srclen - p). The caller guarantees j < p and p <= srclen.
-fn extAt(m: *const matchfind.Matcher, p: usize, j: usize, srclen: usize) usize {
-    const cap = @min(@as(usize, 258), srclen - p);
-    var k: usize = 0;
-    while (k < cap and m.src.at(j + k) == m.src.at(p + k)) : (k += 1) {}
-    return k;
-}
 
 // ---------------------------------------------------------------------------
 // v1 -> v3 converter
