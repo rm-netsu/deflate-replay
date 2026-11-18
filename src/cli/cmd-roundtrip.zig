@@ -5,9 +5,8 @@ const mod_flags = @import("flags.zig");
 const CommonFlags = mod_flags.CommonFlags;
 const parseCommonFlag = mod_flags.parseCommonFlag;
 const flagsToAnalyzeOptions = mod_flags.flagsToAnalyzeOptions;
-const writeWholeFile = mod_file_io.writeWholeFile;
-
 const mod_file_io = @import("file-io.zig");
+const writeWholeFile = mod_file_io.writeWholeFile;
 const readFile = mod_file_io.readFile;
 
 const mod_stream_stats = @import("stream-stats.zig");

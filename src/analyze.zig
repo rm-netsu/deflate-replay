@@ -14,6 +14,7 @@ const container = @import("container.zig");
 const params = @import("params.zig");
 const records = @import("records.zig");
 const compact3 = @import("compact3.zig");
+const format_v1 = @import("format/v1.zig");
 const raw = @import("raw.zig");
 const stats = @import("stats.zig");
 
@@ -87,7 +88,6 @@ pub fn analyze(
     return res;
 }
 
-const format_v1 = @import("format/v1.zig");
 
 fn analyzeV1(
     gpa: std.mem.Allocator,

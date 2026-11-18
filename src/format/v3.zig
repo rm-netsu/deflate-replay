@@ -3,6 +3,7 @@ const bits = @import("../bits.zig");
 const matchfind = @import("../matchfind.zig");
 const tables = @import("../tables.zig");
 const huffman = @import("../huffman.zig");
+const rc = @import("../rc.zig");
 const container = @import("../container.zig");
 
 const params = @import("../params.zig");
@@ -417,7 +418,6 @@ pub const WalkCtx = struct {
     prev_lit: bool = false,
 };
 
-const rc = @import("../rc.zig");
 
 pub const Models = struct {
     const Self = @This();

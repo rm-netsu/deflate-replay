@@ -27,7 +27,9 @@ const huffman = @import("huffman.zig");
 const tables = @import("tables.zig");
 const container = @import("container.zig");
 const params = @import("params.zig");
+const format_v1 = @import("format/v1.zig");
 const matchfind = @import("matchfind.zig");
+const format_v2 = @import("format/v2.zig");
 const stats = @import("stats.zig");
 
 pub const Options = stats.Options;
@@ -420,8 +422,6 @@ fn litLenFor(btype: u2, dh: ?*const DynHdr, lcode: u8) u8 {
     return if (btype == 2) dh.?.lens[sym] else tables.fixed_literal_lengths[sym];
 }
 
-const format_v1 = @import("format/v1.zig");
-const format_v2 = @import("format/v2.zig");
 
 /// Converts v1 params (as produced by analyzeV1) plus the matching raw data
 /// into a DRP2 params file. Patches rank statistics into `res`.
