@@ -132,6 +132,12 @@ pub const Provider = struct {
                 .{self.stream_no},
             );
 
+        if (hlen < 10)
+            return self.bad(
+                "gzip header too short in stream {d} ({d} bytes)",
+                .{ self.stream_no, hlen },
+            );
+
         return self.pr.slice(hlen) catch
             return self.bad(
                 "gzip header truncated in stream {d}",
@@ -376,3 +382,13 @@ pub const Provider = struct {
         return null;
     }
 };
+
+test "v1 provider rejects a too-short gzip header" {
+    var diagnostics = mod_diagnostics.Diagnostics{};
+    // kind = 2 (gzip), header_len = 0 (a real gzip header is >= 10 bytes)
+    const bytes = "DRP1\x01\x00\x02\x00\x00";
+    const pr = try Reader.init(bytes);
+    var pv = Provider.init(pr, &diagnostics);
+    try std.testing.expectEqual(@as(u8, 2), try pv.nextKind());
+    try std.testing.expectError(error.BadParams, pv.gzipHeader());
+}

@@ -143,6 +143,11 @@ pub const Provider = struct {
                 .{self.stream_no},
             );
         const hlen = container.le16(s);
+        if (hlen < 10)
+            return self.bad(
+                "gzip header too short in stream {d} ({d} bytes)",
+                .{ self.stream_no, hlen },
+            );
         return self.br.readSlice(hlen) catch
             return self.bad(
                 "gzip header truncated in stream {d}",
@@ -940,4 +945,21 @@ fn encodeFallback(
             return .fb_escape;
         },
     }
+}
+
+test "v3 provider rejects a too-short gzip header" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics{};
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try aw.writer.writeAll(&magic);
+    try aw.writer.writeByte(3);
+    try aw.writer.writeByte(0);
+    try aw.writer.writeByte(2); // kind = gzip
+    try aw.writer.writeByte(0); // header_len = 0 (invalid)
+    try aw.writer.writeByte(0);
+    var pv = try Provider.init(allocator, aw.written(), null, &diagnostics);
+    defer pv.deinit();
+    try std.testing.expectEqual(@as(u8, 2), try pv.nextKind());
+    try std.testing.expectError(error.BadParams, pv.gzipHeader());
 }
