@@ -106,6 +106,95 @@ pub fn emitDynHeader(
 }
 
 // ---------------------------------------------------------------------------
+// shared helpers for the v1 -> v2 / v1 -> v3 converters
+// ---------------------------------------------------------------------------
+
+pub fn cvFail(diagnostics: *Diagnostics, stream_no: usize) error{BadParams} {
+    diagnostics.set(
+        "v1 params/raw data inconsistent in stream {d}",
+        .{stream_no},
+    );
+    return error.BadParams;
+}
+
+/// Copies the container framing of the current v1 record (the kind byte
+/// itself must already be emitted) and returns whether the stream uses a
+/// preset dictionary (zlib FDICT).
+pub fn copyStreamHeader(pv: *format_v1.Provider, bw: *bits.BitWriter) !bool {
+    var fdict = false;
+    switch (pv.kind) {
+        @intFromEnum(container.Kind.zlib) => {
+            const hdr = try pv.zlibHeader();
+            try bw.writeAligned(&hdr);
+            fdict = hdr[1] & 0x20 != 0;
+            if (fdict) {
+                const dict = try pv.fdictId();
+                try bw.writeAligned(&dict);
+            }
+        },
+        @intFromEnum(container.Kind.gzip) => {
+            const gh = try pv.gzipHeader();
+            const lenb = [2]u8{ @truncate(gh.len), @truncate(gh.len >> 8) };
+            try bw.writeAligned(&lenb);
+            try bw.writeAligned(gh);
+        },
+        else => {},
+    }
+    return fdict;
+}
+
+/// Verifies a stored block against the raw data (skipped for self-contained
+/// streams) and emits the compact stored-block fields. Returns the block
+/// length so the caller can advance its raw-position cursor.
+pub fn copyStoredBlock(
+    pv: *format_v1.Provider,
+    bw: *bits.BitWriter,
+    bh: BlockHdr,
+    raw_bytes: []const u8,
+    raw_base: usize,
+    p: usize,
+    self_contained: bool,
+    stream_no: usize,
+    diagnostics: *Diagnostics,
+) !u16 {
+    const sb = try pv.storedBlock(0);
+    if (!self_contained) {
+        const start = raw_base + p;
+        if (start + @as(usize, sb.len) > raw_bytes.len)
+            return cvFail(diagnostics, stream_no);
+        if (!std.mem.eql(u8, sb.data.?[0..sb.len], raw_bytes[start..][0..sb.len]))
+            return cvFail(diagnostics, stream_no);
+    }
+    try bw.writeBit(@intFromBool(bh.bfinal));
+    try bw.writeBits(0, 2);
+    try bw.writeBits(sb.pad & 0x7F, 7);
+    try params.putUvarint(bw, sb.len);
+    if (self_contained) {
+        for (sb.data.?[0..sb.len]) |b|
+            try bw.writeBits(b, 8);
+    }
+    return sb.len;
+}
+
+/// Emits the verbatim trailing pad bits and the container checksum of the
+/// current v1 record.
+pub fn copyStreamTrailer(pv: *format_v1.Provider, bw: *bits.BitWriter) !void {
+    const pad = try pv.streamTrailingPad();
+    try bw.writeBits(pad & 0x7F, 7);
+    try bw.padToBoundary(0);
+
+    const cs = try pv.checksumTrailer();
+    try bw.writeAligned(cs);
+}
+
+/// Copies the verbatim trailing-bytes record (kind 4).
+pub fn copyTrailingRecord(pv: *format_v1.Provider, bw: *bits.BitWriter) !void {
+    const tr = try pv.trailingRecord();
+    try params.putUvarint(bw, tr.count);
+    try bw.writeAligned(tr.bytes);
+}
+
+// ---------------------------------------------------------------------------
 // v1 -> v2 converter
 // ---------------------------------------------------------------------------
 
@@ -137,14 +226,6 @@ fn putDistFields(bw: *bits.BitWriter, dist: u32) !void {
 fn litLenFor(btype: u2, dh: ?*const DynHdr, lcode: u8) u8 {
     const sym: usize = @as(usize, lcode) + 257;
     return if (btype == 2) dh.?.lens[sym] else tables.fixed_literal_lengths[sym];
-}
-
-fn cvFail(diagnostics: *Diagnostics, stream_no: usize) error{BadParams} {
-    diagnostics.set(
-        "v1 params/raw data inconsistent in stream {d}",
-        .{stream_no},
-    );
-    return error.BadParams;
 }
 
 const format_v1 = @import("format/v1.zig");
@@ -183,32 +264,12 @@ pub fn convert(
         try bw.writeAligned(&[_]u8{kind});
 
         if (kind == @intFromEnum(container.Kind.trailing)) {
-            const tr = try pv.trailingRecord();
-            try params.putUvarint(&bw, tr.count);
-            try bw.writeAligned(tr.bytes);
+            try copyTrailingRecord(&pv, &bw);
             continue;
         }
 
         const st = &res.streams[pv.stream_no - 1];
-        var fdict = false;
-        switch (kind) {
-            @intFromEnum(container.Kind.zlib) => {
-                const hdr = try pv.zlibHeader();
-                try bw.writeAligned(&hdr);
-                fdict = hdr[1] & 0x20 != 0;
-                if (fdict) {
-                    const dict = try pv.fdictId();
-                    try bw.writeAligned(&dict);
-                }
-            },
-            @intFromEnum(container.Kind.gzip) => {
-                const gh = try pv.gzipHeader();
-                const lenb = [2]u8{ @truncate(gh.len), @truncate(gh.len >> 8) };
-                try bw.writeAligned(&lenb);
-                try bw.writeAligned(gh);
-            },
-            else => {},
-        }
+        const fdict = try copyStreamHeader(&pv, &bw);
 
         const self_contained = opts.self_contained or fdict;
         const rank_mode = opts.use_rank and !self_contained;
@@ -223,22 +284,17 @@ pub fn convert(
             const bh = try pv.blockHeader();
 
             if (bh.btype == 0) {
-                const sb = try pv.storedBlock(0);
-                if (!self_contained) {
-                    const start = raw_base + p;
-                    if (start + @as(usize, sb.len) > raw_bytes.len) return cvFail(diagnostics, pv.stream_no);
-                    if (!std.mem.eql(u8, sb.data.?[0..sb.len], raw_bytes[start..][0..sb.len]))
-                        return cvFail(diagnostics, pv.stream_no);
-                }
-                try bw.writeBit(@intFromBool(bh.bfinal));
-                try bw.writeBits(0, 2);
-                try bw.writeBits(sb.pad & 0x7F, 7);
-                try params.putUvarint(&bw, sb.len);
-                if (self_contained) {
-                    for (sb.data.?[0..sb.len]) |b|
-                        try bw.writeBits(b, 8);
-                }
-                p += sb.len;
+                p += try copyStoredBlock(
+                    &pv,
+                    &bw,
+                    bh,
+                    raw_bytes,
+                    raw_base,
+                    p,
+                    self_contained,
+                    pv.stream_no,
+                    diagnostics,
+                );
                 if (bh.bfinal) break :blocks;
                 continue;
             }
@@ -332,12 +388,7 @@ pub fn convert(
             if (bh.bfinal) break :blocks;
         }
 
-        const pad = try pv.streamTrailingPad();
-        try bw.writeBits(pad & 0x7F, 7);
-        try bw.padToBoundary(0);
-
-        const cs = try pv.checksumTrailer();
-        try bw.writeAligned(cs);
+        try copyStreamTrailer(&pv, &bw);
         const raw_len = try pv.rawLen();
         try params.putUvarint(&bw, raw_len);
         if (!self_contained) {

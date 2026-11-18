@@ -48,11 +48,6 @@ pub const Diagnostics = @import("diagnostics.zig").Diagnostics;
 // v1 -> v3 converter
 // ---------------------------------------------------------------------------
 
-fn cvFail(diagnostics: *Diagnostics, stream_no: usize) error{BadParams} {
-    diagnostics.set("v1 params/raw data inconsistent in stream {d}", .{stream_no});
-    return error.BadParams;
-}
-
 /// Converts v1 params (as produced by analyzeV1) plus the matching raw data
 /// into a DRP3 params file. Patches rank statistics into `res`.
 pub fn convert3(
@@ -86,32 +81,12 @@ pub fn convert3(
         try bw.writeAligned(&[_]u8{kind});
 
         if (kind == @intFromEnum(container.Kind.trailing)) {
-            const tr = try pv.trailingRecord();
-            try params.putUvarint(&bw, tr.count);
-            try bw.writeAligned(tr.bytes);
+            try records.copyTrailingRecord(&pv, &bw);
             continue;
         }
 
         const st = &res.streams[pv.stream_no - 1];
-        var fdict = false;
-        switch (kind) {
-            @intFromEnum(container.Kind.zlib) => {
-                const hdr = try pv.zlibHeader();
-                try bw.writeAligned(&hdr);
-                fdict = hdr[1] & 0x20 != 0;
-                if (fdict) {
-                    const dict = try pv.fdictId();
-                    try bw.writeAligned(&dict);
-                }
-            },
-            @intFromEnum(container.Kind.gzip) => {
-                const gh = try pv.gzipHeader();
-                const lenb = [2]u8{ @truncate(gh.len), @truncate(gh.len >> 8) };
-                try bw.writeAligned(&lenb);
-                try bw.writeAligned(gh);
-            },
-            else => {},
-        }
+        const fdict = try records.copyStreamHeader(&pv, &bw);
 
         const self_contained = opts.self_contained or fdict;
         const rank_mode = opts.use_rank and !self_contained;
@@ -119,7 +94,8 @@ pub fn convert3(
         try bw.writeBit(@intFromBool(rank_mode));
 
         const st_raw_len: usize = @intCast(st.raw_len);
-        if (!fdict and raw_base + st_raw_len > raw_bytes.len) return cvFail(diagnostics, pv.stream_no);
+        if (!fdict and raw_base + st_raw_len > raw_bytes.len)
+            return records.cvFail(diagnostics, pv.stream_no);
         try params.putUvarint(&bw, st.raw_len);
 
         matcher.* = matchfind.Matcher.init(.{ .slice = .{
@@ -142,21 +118,17 @@ pub fn convert3(
             const bh = try pv.blockHeader();
 
             if (bh.btype == 0) {
-                const sb = try pv.storedBlock(0);
-                if (!self_contained) {
-                    const start = raw_base + p;
-                    if (start + @as(usize, sb.len) > raw_bytes.len) return cvFail(diagnostics, pv.stream_no);
-                    if (!std.mem.eql(u8, sb.data.?[0..sb.len], raw_bytes[start..][0..sb.len]))
-                        return cvFail(diagnostics, pv.stream_no);
-                }
-                try bw.writeBit(@intFromBool(bh.bfinal));
-                try bw.writeBits(0, 2);
-                try bw.writeBits(sb.pad & 0x7F, 7);
-                try params.putUvarint(&bw, sb.len);
-                if (self_contained) {
-                    for (sb.data.?[0..sb.len]) |b| try bw.writeBits(b, 8);
-                }
-                p += sb.len;
+                p += try records.copyStoredBlock(
+                    &pv,
+                    &bw,
+                    bh,
+                    raw_bytes,
+                    raw_base,
+                    p,
+                    self_contained,
+                    pv.stream_no,
+                    diagnostics,
+                );
                 if (bh.bfinal) break :blocks;
                 continue;
             }
@@ -225,14 +197,9 @@ pub fn convert3(
             if (bh.bfinal) break :blocks;
         }
 
-        const pad = try pv.streamTrailingPad();
-        try bw.writeBits(pad & 0x7F, 7);
-        try bw.padToBoundary(0);
-
-        const cs = try pv.checksumTrailer();
-        try bw.writeAligned(cs);
+        try records.copyStreamTrailer(&pv, &bw);
         const v1_raw_len = try pv.rawLen();
-        if (v1_raw_len != st.raw_len) return cvFail(diagnostics, pv.stream_no);
+        if (v1_raw_len != st.raw_len) return records.cvFail(diagnostics, pv.stream_no);
         if (!self_contained) {
             const crc = std.hash.Crc32.hash(raw_bytes[raw_base..][0..st_raw_len]);
             try bw.writeAligned(&.{
